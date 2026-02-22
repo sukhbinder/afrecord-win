@@ -1,6 +1,6 @@
 [project]
 name = "afrecord-win"
-version = "0.0.1"
+version = "0.1.0"
 description = "Record sound in cli in windows"
 readme = "README.md"
 authors = [{name = "Sukhbinder Singh"}]
@@ -9,9 +9,7 @@ requires-python = ">=3.8"
 classifiers = [
     "License :: OSI Approved :: Apache Software License"
 ]
-dependencies = [
-    "click"
-]
+dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/sukhbinder/afrecord-win"

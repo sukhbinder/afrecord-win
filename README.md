@@ -15,14 +15,28 @@ pip install afrecord-win
 ```
 ## Usage
 
+Record audio from the default microphone:
+```bash
+afrecord
+```
+
+Specify a custom output file:
+```bash
+afrecord -o my_recording.wav
+afrecord --output my_recording.wav
+```
+
 For help, run:
 ```bash
 afrecord --help
 ```
+
 You can also use:
 ```bash
 python -m afrecord --help
 ```
+
+Press **Enter** or **Ctrl+C** to stop recording.
 ## Development
 
 To contribute to this tool, first checkout the code. Then create a new virtual environment:
