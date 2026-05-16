@@ -1,70 +1,27 @@
+import ctypes
 import os
 import sys
-import subprocess
-import tempfile
-import time
-import threading
-from pathlib import Path
+from ctypes import wintypes
+
+winmm = ctypes.WinDLL("winmm.dll")
+
+mciSendString = winmm.mciSendStringW
+mciSendString.argtypes = [
+    wintypes.LPCWSTR,
+    wintypes.LPWSTR,
+    wintypes.UINT,
+    wintypes.HANDLE,
+]
+
+mciSendString.restype = wintypes.UINT
 
 
-def create_powershell_script():
-    """Create the PowerShell script content for audio recording"""
-    return """
-param([string]$outPath)
-
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-public class MciAudio {
-    [DllImport("winmm.dll", CharSet=CharSet.Auto)]
-    public static extern int mciSendString(
-        string command, StringBuilder buffer, int bufferSize, IntPtr callback);
-}
-"@
-
-function Mci([string]$cmd) {
-    $buf = New-Object System.Text.StringBuilder 256
-    $r = [MciAudio]::mciSendString($cmd, $buf, 256, [IntPtr]::Zero)
-    if ($r -ne 0) {
-        [Console]::Error.WriteLine("MCI error $r for: $cmd")
-    }
-    return $r
-}
-
-$r = Mci "open new type waveaudio alias omp_rec"
-if ($r -ne 0) { exit 1 }
-
-Mci "set omp_rec channels 1 samplespersec 16000 bitspersample 16"
-
-$r = Mci "record omp_rec"
-if ($r -ne 0) {
-    Mci "close omp_rec"
-    exit 1
-}
-
-Write-Output "RECORDING"
-[Console]::Out.Flush()
-
-# Block until parent closes stdin or writes a line
-try { [Console]::In.ReadLine() | Out-Null } catch {}
-
-# Stop and save
-Mci "stop omp_rec"
-$saveCmd = 'save omp_rec "' + $outPath + '"'
-$r = Mci $saveCmd
-if ($r -ne 0) {
-    [Console]::Error.WriteLine("Save failed for: $saveCmd")
-}
-Mci "close omp_rec"
-
-if (Test-Path $outPath) {
-    Write-Output "SAVED"
-} else {
-    Write-Error "Output file was not created: $outPath"
-    exit 1
-}
-"""
+def mci(cmd):
+    buffer = ctypes.create_unicode_buffer(256)
+    result = mciSendString(cmd, buffer, 256, None)
+    if result != 0:
+        print(f"MCI error {result} for: {cmd}", file=sys.stderr)
+    return result
 
 
 class AudioRecorder:
@@ -80,57 +37,26 @@ class AudioRecorder:
             return False
 
         try:
-            # Create temporary PowerShell script
-            self.temp_script_path = os.path.join(
-                tempfile.gettempdir(), f"omp-stt-record-{int(time.time())}.ps1"
-            )
-
-            with open(self.temp_script_path, "w") as f:
-                f.write(create_powershell_script())
-
-            # Start PowerShell process
-            self.process = subprocess.Popen(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    self.temp_script_path,
-                    output_path,
-                ],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-
-            # Wait for recording to start (check for "RECORDING" in output)
-            start_time = time.time()
-            output = ""
-
-            while time.time() - start_time < 8:
-                if self.process.stdout:
-                    line = self.process.stdout.readline()
-                    if line:
-                        output += line
-                        if "RECORDING" in line:
-                            self.recording = True
-                            print("Recording started")
-                            return True
-
-                # Check if process exited
-                if self.process.poll() is not None:
-                    break
-
-            if not self.recording:
-                # Process failed to start properly
-                stderr_output = ""
-                if self.process.stderr:
-                    stderr_output = self.process.stderr.read()
-                print(f"PowerShell recording failed to start: {stderr_output}")
-                self.cleanup()
+            if mci("open new type waveaudio alias omp_rec") != 0:
                 return False
+
+            buffer = ctypes.create_unicode_buffer(256)
+            mciSendString(
+                "set omp_rec channels 1 samplepersec 16000 bitspersample 16",
+                buffer,
+                256,
+                None,
+            )
+
+            if mci("record omp_rec") != 0:
+                mci("close omp_rec")
+                return False
+
+            print("RECORDING")
+            sys.stdout.flush()
+
+            self.output_path = output_path
+            self.recording = True
 
         except Exception as e:
             print(f"Error starting recording: {e}")
@@ -141,32 +67,19 @@ class AudioRecorder:
 
     def stop_recording(self) -> bool:
         """Stop the current recording"""
-        if not self.recording or not self.process:
+        if not self.recording:
             print("Not currently recording")
             return False
 
         try:
-            # Send stop command to PowerShell script
-            if self.process.stdin:
-                self.process.stdin.write("stop\n")
-                self.process.stdin.flush()
-                self.process.stdin.close()
+            mci("stop omp_rec")
+            save_cmd = f'save omp_rec "{self.output_path}"'
+            if mci(save_cmd) != 0:
+                print(f"Save failed for : {save_cmd}", file=sys.stderr)
+                return False
 
-            # Wait for process to finish with timeout
-            timeout = 8
-            start_time = time.time()
-
-            while self.process.poll() is None and (time.time() - start_time) < timeout:
-                time.sleep(0.1)
-
-            if self.process.poll() is None:
-                # Force kill if still running
-                self.process.kill()
-                self.process.wait()
-
-            # Clean up temp script
+            mci("close omp_rec")
             self.cleanup()
-
             print("Recording stopped")
             return True
 
@@ -177,14 +90,7 @@ class AudioRecorder:
 
     def cleanup(self):
         """Clean up temporary files and processes"""
-        try:
-            if self.temp_script_path and os.path.exists(self.temp_script_path):
-                os.remove(self.temp_script_path)
-        except:
-            pass
-
         self.recording = False
-        self.process = None
 
 
 def main():
