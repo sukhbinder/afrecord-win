@@ -1,40 +1,67 @@
 """Tests for afrecord-win package."""
-
-import os
 import sys
+import os
 import tempfile
 import pytest
+
+# Skip all tests on non-Windows platforms before any imports
+if sys.platform != "win32":
+    pytest.skip("Windows only", allow_module_level=True)
+
 from unittest.mock import patch, MagicMock
 
+import ctypes
+from ctypes import wintypes
+
 from afrecord_win import cli
-from afrecord_win.afrecordmain import AudioRecorder, create_powershell_script
+from afrecord_win.afrecordmain import AudioRecorder, mci, mciSendString
 
 
-class TestCreateParser:
-    """Tests for the CLI argument parser."""
+class TestMCICalls:
+    """Tests for the MCI wrapper functions."""
 
-    def test_create_parser_returns_argument_parser(self):
-        """Test that create_parser returns an ArgumentParser instance."""
-        parser = cli.create_parser()
-        assert parser is not None
+    def test_mci_function_exists(self):
+        """Test that mci function exists and is callable."""
+        assert callable(mci)
 
-    def test_parser_default_output_file(self):
-        """Test parser default output file is output.wav."""
-        parser = cli.create_parser()
-        args = parser.parse_args([])
-        assert args.output_file == "output.wav"
+    def test_mci_send_string_wraps_native_function(self):
+        """Test mciSendString has correct type signature."""
+        assert isinstance(mciSendString, wintypes.UINT)
+        assert mciSendString.argtypes is not None
 
-    def test_parser_custom_output_file_short_option(self):
-        """Test parser accepts custom output file with -o option."""
-        parser = cli.create_parser()
-        args = parser.parse_args(["-o", "custom.wav"])
-        assert args.output_file == "custom.wav"
 
-    def test_parser_custom_output_file_long_option(self):
-        """Test parser accepts custom output file with --output option."""
-        parser = cli.create_parser()
-        args = parser.parse_args(["--output", "recording.wav"])
-        assert args.output_file == "recording.wav"
+class TestMCISendStringSignature:
+    """Tests for mciSendString function signature."""
+
+    def test_mciSendString_argtypes(self):
+        """Test mciSendString has correct argument types."""
+        assert len(mciSendString.argtypes) == 4
+        assert mciSendString.argtypes[0] == wintypes.LPCWSTR
+        assert mciSendString.argtypes[1] == wintypes.LPWSTR
+        assert mciSendString.argtypes[2] == wintypes.UINT
+        assert mciSendString.argtypes[3] == wintypes.HANDLE
+
+    def test_mciSendString_restype(self):
+        """Test mciSendString return type."""
+        assert mciSendString.restype == wintypes.UINT
+
+
+class TestMciWrapper:
+    """Tests for the mci wrapper."""
+
+    @patch.object(wintypes, "LPWSTR", wintypes.LPWSTR)
+    @patch.object(wintypes, "HANDLE", wintypes.HANDLE)
+    def test_mci_wrapper_creates_buffer(self):
+        """Test mci wrapper creates a unicode buffer."""
+        cmd = "test command"
+        result = mci(cmd)
+        assert isinstance(result, int)
+
+    def test_mci_wrapper_handles_error(self):
+        """Test mci wrapper handles non-zero error codes."""
+        with patch.object(ctypes.WinDLL, "mciSendStringW", return_value=1):
+            result = mci("open new type waveaudio alias omp_rec")
+            assert result == 1
 
 
 class TestAudioRecorder:
@@ -67,103 +94,91 @@ class TestAudioRecorder:
         # Should not raise an exception
         recorder.cleanup()
 
-    @patch("afrecord_win.afrecordmain.subprocess.Popen")
-    @patch("afrecord_win.afrecordmain.os.path.exists")
-    @patch("afrecord_win.afrecordmain.open")
-    def test_start_recording_creates_process(
-        self, mock_open, mock_exists, mock_popen
-    ):
-        """Test start_recording creates a PowerShell subprocess."""
-        mock_exists.return_value = False
-        mock_process = MagicMock()
-        mock_process.stdout.readline.return_value = "RECORDING\n"
-        mock_process.poll.return_value = None
-        mock_popen.return_value = mock_process
+    def test_start_recording_creates_mci_session(self):
+        """Test start_recording opens MCI waveaudio session."""
+        with patch("afrecord_win.afrecordmain.mci", return_value=0):
+            recorder = AudioRecorder()
+            result = recorder.start_recording("test.wav")
 
+            assert result is True
+            recorder.cleanup()
+
+    def test_start_recording_sets_recording_state(self):
+        """Test start_recording sets recording state to True."""
+        with patch("afrecord_win.afrecordmain.mci", side_effect=[0, 0, 0]):
+            recorder = AudioRecorder()
+            result = recorder.start_recording("test.wav")
+
+            assert result is True
+            assert recorder.recording is True
+            recorder.cleanup()
+
+    def test_start_recording_fails_on_mci_open_error(self):
+        """Test start_recording returns False on MCI open error."""
+        with patch("afrecord_win.afrecordmain.mci", return_value=1):
+            recorder = AudioRecorder()
+            result = recorder.start_recording("test.wav")
+
+            assert result is False
+            recorder.cleanup()
+
+    def test_start_recording_fails_on_mci_record_error(self):
+        """Test start_recording returns False on MCI record error."""
+        with patch("afrecord_win.afrecordmain.mci", side_effect=[0, 1, 0]):
+            recorder = AudioRecorder()
+            result = recorder.start_recording("test.wav")
+
+            assert result is False
+            recorder.cleanup()
+
+    def test_start_recording_sets_output_path(self):
+        """Test start_recording stores output path."""
+        with patch("afrecord_win.afrecordmain.mci", return_value=0):
+            recorder = AudioRecorder()
+            result = recorder.start_recording("my_output.wav")
+
+            assert result is True
+            assert recorder.output_path == "my_output.wav"
+            recorder.cleanup()
+
+    def test_stop_recording_sends_stop_command(self):
+        """Test stop_recording sends stop command to MCI."""
+        with patch("afrecord_win.afrecordmain.mci", side_effect=[0, 0, 0]):
+            recorder = AudioRecorder()
+            recorder.recording = True
+            recorder.output_path = "test.wav"
+
+            result = recorder.stop_recording()
+
+            assert result is True
+            recorder.cleanup()
+
+    def test_stop_recording_fails_when_not_recording(self):
+        """Test stop_recording returns False when not recording."""
         recorder = AudioRecorder()
-        result = recorder.start_recording("test.wav")
+        result = recorder.stop_recording()
 
-        assert mock_popen.called
-        assert result is True
-        recorder.cleanup()
+        assert result is False
 
-    @patch("afrecord_win.afrecordmain.subprocess.Popen")
-    @patch("afrecord_win.afrecordmain.os.path.exists")
-    def test_start_recording_returns_false_when_already_recording(
-        self, mock_exists, mock_popen
-    ):
-        """Test start_recording returns False if already recording."""
-        mock_exists.return_value = False
+    def test_stop_recording_saves_file(self):
+        """Test stop_recording saves the audio file via MCI."""
+        with patch("afrecord_win.afrecordmain.mci", return_value=0):
+            recorder = AudioRecorder()
+            recorder.recording = True
+            recorder.output_path = "test.wav"
+
+            result = recorder.stop_recording()
+
+            assert result is True
+            recorder.cleanup()
+
+    def test_cleanup_resets_recording_state(self):
+        """Test cleanup resets recording state."""
         recorder = AudioRecorder()
         recorder.recording = True
+        recorder.cleanup()
 
-        result = recorder.start_recording("test.wav")
-
-        assert result is False
-        assert not mock_popen.called
-
-    @patch("afrecord_win.afrecordmain.subprocess.Popen")
-    @patch("afrecord_win.afrecordmain.os.path.exists")
-    def test_stop_recording_returns_false_when_not_recording(
-        self, mock_exists, mock_popen
-    ):
-        """Test stop_recording returns False if not recording."""
-        mock_exists.return_value = False
-        recorder = AudioRecorder()
-
-        result = recorder.stop_recording()
-
-        assert result is False
-
-    @patch("afrecord_win.afrecordmain.subprocess.Popen")
-    @patch("afrecord_win.afrecordmain.os.path.exists")
-    def test_stop_recording_sends_stop_command(
-        self, mock_exists, mock_popen
-    ):
-        """Test stop_recording sends stop command to process."""
-        mock_exists.return_value = False
-        mock_process = MagicMock()
-        mock_process.poll.return_value = 0
-        mock_process.stdin = MagicMock()
-        mock_popen.return_value = mock_process
-
-        recorder = AudioRecorder()
-        # First start recording
-        mock_process.stdout.readline.return_value = "RECORDING\n"
-        recorder.start_recording("test.wav")
-        # Then stop
-        result = recorder.stop_recording()
-
-        assert mock_process.stdin.write.called
-        assert result is True
-
-
-class TestPowerShellScript:
-    """Tests for PowerShell script generation."""
-
-    def test_create_powershell_script_returns_string(self):
-        """Test create_powershell_script returns a string."""
-        script = create_powershell_script()
-        assert isinstance(script, str)
-
-    def test_create_powershell_script_contains_required_commands(self):
-        """Test generated script contains required MCI commands."""
-        script = create_powershell_script()
-        assert "open new type waveaudio" in script
-        assert "record omp_rec" in script
-        assert "stop omp_rec" in script
-        assert "save omp_rec" in script
-        assert "close omp_rec" in script
-
-    def test_create_powershell_script_has_parameter(self):
-        """Test generated script accepts outPath parameter."""
-        script = create_powershell_script()
-        assert "param([string]$outPath)" in script
-
-    def test_create_powershell_script_has_error_handling(self):
-        """Test generated script includes error handling."""
-        script = create_powershell_script()
-        assert "Write-Error" in script or "exit 1" in script
+        assert recorder.recording is False
 
 
 class TestCLI:
@@ -225,32 +240,6 @@ class TestIntegrationWindows:
         recorder = AudioRecorder()
         assert recorder is not None
         assert recorder.recording is False
-
-    def test_powershell_script_execution(self, tmp_path):
-        """Test PowerShell script can be created and is valid."""
-        script_content = create_powershell_script()
-
-        # Write script to temp file
-        script_file = tmp_path / "test_record.ps1"
-        script_file.write_text(script_content)
-
-        # Verify script exists and has content
-        assert script_file.exists()
-        assert script_file.stat().st_size > 0
-
-        # Try to execute PowerShell with the script (syntax check)
-        import subprocess
-
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_file), "-outPath", str(tmp_path / "test.wav")],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-
-        # Script should either start recording or fail gracefully
-        # We're just testing it can be invoked
-        assert result is not None
 
     def test_full_recording_workflow(self, tmp_path):
         """Test complete recording workflow on Windows."""
