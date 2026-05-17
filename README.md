@@ -5,7 +5,7 @@
 [![Tests](https://github.com/sukhbinder/afrecord-win/actions/workflows/test.yml/badge.svg)](https://github.com/sukhbinder/afrecord-win/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/sukhbinder/afrecord-win/blob/master/LICENSE)
 
-Record sound in cli in windows
+Record sound in cli in windows with standard python.
 
 ## Installation
 
